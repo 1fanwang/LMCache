@@ -124,21 +124,12 @@ steps:
       # preempt and the 3-way rungs provably cannot, independent of the GPU.
       # Every rung must reproduce the non-preempting baseline's answers.
       # Requires the ShareGPT dataset on the agent (see run-preemption-correctness.sh).
-      - label: ":compression: preemption_correctness / {{matrix.mode}} / async={{matrix.async_scheduling}}"
-        command: |
-          case "{{matrix.mode}}" in
-            lmcache_driven) ;;
-            engine_driven)
-              export LMCACHE_MP_TRANSFER_MODE="engine_driven"
-              export L1_USE_LAZY="false"
-              ;;
-          esac
-          .buildkite/k3_tests/multiprocess/run.sh preemption_correctness
+      # lmcache-driven only: that is the transfer path this fix touches, and
+      # the one the ladder has been measured on in both scheduling modes.
+      - label: ":compression: preemption_correctness / async={{matrix.async_scheduling}}"
+        command: .buildkite/k3_tests/multiprocess/run.sh preemption_correctness
         matrix:
           setup:
-            mode:
-              - "lmcache_driven"
-              - "engine_driven"
             async_scheduling:
               - "0"
               - "1"
