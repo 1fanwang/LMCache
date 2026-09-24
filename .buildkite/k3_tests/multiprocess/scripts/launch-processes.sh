@@ -132,6 +132,15 @@ if [ -n "${NUM_GPU_BLOCKS_OVERRIDE:-}" ]; then
     NUM_GPU_BLOCKS_OVERRIDE_ARG="--num-gpu-blocks-override ${NUM_GPU_BLOCKS_OVERRIDE}"
 fi
 
+# vLLM async scheduling on both servers. Off by default: the determinism tests
+# were qualified with it off. ASYNC_SCHEDULING=1 turns it on, which the
+# preemption matrix uses -- with a consumer-role connector vLLM then defers
+# block frees to the end of the in-flight step, a different preemption path.
+ASYNC_SCHEDULING_ARG="--no-async-scheduling"
+if [ "${ASYNC_SCHEDULING:-0}" = "1" ] || [ "${ASYNC_SCHEDULING:-0}" = "true" ]; then
+    ASYNC_SCHEDULING_ARG="--async-scheduling"
+fi
+
 # Split kernel groups into one object group per sliding-window size at
 # KV-cache registration. Required for hybrid models (e.g. gemma-4's
 # sliding-window + full-attention groups have different block sizes); without
@@ -277,7 +286,7 @@ env "${DEVICE_AFFINITY_VAR}=${GPU_FOR_VLLM}" \
         --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
         $ATTENTION_BACKEND_ARG \
         --port "$vllm_port" \
-        --no-async-scheduling \
+        $ASYNC_SCHEDULING_ARG \
         $MAX_MODEL_LEN_ARG \
         $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
@@ -308,7 +317,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
         vllm serve "$MODEL" \
             $ATTENTION_BACKEND_ARG \
             --port "$vllm_baseline_port" \
-            --no-async-scheduling \
+            $ASYNC_SCHEDULING_ARG \
             $MAX_MODEL_LEN_ARG \
             $ENFORCE_EAGER_ARG \
             $GPU_MEMORY_UTIL_ARG \

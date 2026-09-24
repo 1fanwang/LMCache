@@ -109,9 +109,39 @@ because ShareGPT's topic diversity makes failures legible: an answer about
 Fiji that starts explaining bash redirection is cross-request contamination,
 not numerical drift.
 
+## Async scheduling
+
+`--async-scheduling` is the second axis of the matrix. With a consumer-role
+connector vLLM then defers block frees to the end of the in-flight step, so
+preemption takes a different path, but nothing above needs to change: the
+low-concurrency rungs still see exactly zero preemptions, so the bound that
+makes them a valid reference survives.
+
+Measured on Qwen3-14B, 99 ShareGPT requests, a 1024-block pool,
+lmcache-driven transfer:
+
+| Rung | sync preemptions | async preemptions |
+|---|---|---|
+| ref (c3) | 0 | 0 |
+| A, plain vLLM (c40) | 64 | 60 |
+| B, C (c3) | 0 | 0 |
+| D, LMCache (c40) | 59 | 308 |
+
+Every rung reproduces its reference in both modes, and the two references
+agree with each other, so scheduling mode does not change the answers.
+
+The difference is the preemption count on rung D: LMCache preempts about as
+often as the baseline under sync scheduling and roughly five times as often
+under async. That is the vLLM scheduler walking down the running list
+preempting victims whose blocks cannot be reused yet because their frees are
+deferred, so one shortfall cascades. It is fixed upstream in
+vllm-project/vllm#49675; check the pinned vLLM against that commit when
+reading these numbers. Wall time was not materially affected here (238 s
+against the baseline's 232 s), and resumed requests recovered more KV
+precisely because there were more of them: 74 requests and 118k tokens
+against 32 and 43k under sync, with vLLM's own prefix cache contributing
+nothing in either case.
+
 ## Not covered
 
-- Async scheduling (`--async-scheduling`) is a separate axis. It provokes a
-  preemption cascade in the vLLM scheduler with deferred block frees, fixed
-  upstream in vllm-project/vllm#49675; check the pin before enabling it.
 - Lazy offload under preemption.

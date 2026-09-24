@@ -124,7 +124,7 @@ steps:
       # preempt and the 3-way rungs provably cannot, independent of the GPU.
       # Every rung must reproduce the non-preempting baseline's answers.
       # Requires the ShareGPT dataset on the agent (see run-preemption-correctness.sh).
-      - label: ":compression: preemption_correctness / {{matrix.mode}}"
+      - label: ":compression: preemption_correctness / {{matrix.mode}} / async={{matrix.async_scheduling}}"
         command: |
           case "{{matrix.mode}}" in
             lmcache_driven) ;;
@@ -139,9 +139,13 @@ steps:
             mode:
               - "lmcache_driven"
               - "engine_driven"
-        timeout_in_minutes: 60
+            async_scheduling:
+              - "0"
+              - "1"
+        timeout_in_minutes: 90
         env:
           LMCACHE_REQUEST_TRANSPORT: "zmq"
+          ASYNC_SCHEDULING: "{{matrix.async_scheduling}}"
           NUM_GPU_BLOCKS_OVERRIDE: "1024"
           MAX_MODEL_LEN: "8192"
           CHUNK_SIZE: "256"
