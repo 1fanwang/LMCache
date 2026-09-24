@@ -119,6 +119,40 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
         artifact_paths: ["*.log"]
 
+      # ShareGPT differential correctness under preemption. Both servers are
+      # pinned to a 1024-block KV pool (16k tokens) so that the 40-way rungs
+      # preempt and the 3-way rungs provably cannot, independent of the GPU.
+      # Every rung must reproduce the non-preempting baseline's answers.
+      # Requires the ShareGPT dataset on the agent (see run-preemption-correctness.sh).
+      - label: ":compression: preemption_correctness / {{matrix.mode}}"
+        command: |
+          case "{{matrix.mode}}" in
+            lmcache_driven) ;;
+            engine_driven)
+              export LMCACHE_MP_TRANSFER_MODE="engine_driven"
+              export L1_USE_LAZY="false"
+              ;;
+          esac
+          .buildkite/k3_tests/multiprocess/run.sh preemption_correctness
+        matrix:
+          setup:
+            mode:
+              - "lmcache_driven"
+              - "engine_driven"
+        timeout_in_minutes: 60
+        env:
+          LMCACHE_REQUEST_TRANSPORT: "zmq"
+          NUM_GPU_BLOCKS_OVERRIDE: "1024"
+          MAX_MODEL_LEN: "8192"
+          CHUNK_SIZE: "256"
+          # Exact cross-concurrency comparison was qualified with eager mode
+          # and the default FLASH_ATTN backend.
+          ENFORCE_EAGER: "1"
+          MAX_WAIT_SECONDS: "600"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: long_doc_qa / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         matrix: *request-transport-matrix
