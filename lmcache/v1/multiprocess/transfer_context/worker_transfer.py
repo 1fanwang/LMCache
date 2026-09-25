@@ -483,8 +483,6 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
         self._mq_timeout: float = 0.0
-        # Stores the server has not finished reading the engine's KV blocks
-        # for. See flush_inflight_stores().
         self._inflight_stores: list[MessagingFuture] = []
         self._inflight_lock = threading.Lock()
 
