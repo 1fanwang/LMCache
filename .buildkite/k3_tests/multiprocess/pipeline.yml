@@ -133,7 +133,10 @@ steps:
             async_scheduling:
               - "0"
               - "1"
-        timeout_in_minutes: 90
+        # Two rungs (~15 min of client time) plus two model loads. Set
+        # PREEMPT_FULL_LADDER=1 to add the three isolating rungs when
+        # debugging; that roughly triples the runtime.
+        timeout_in_minutes: 45
         env:
           LMCACHE_REQUEST_TRANSPORT: "zmq"
           ASYNC_SCHEDULING: "{{matrix.async_scheduling}}"
@@ -146,7 +149,9 @@ steps:
           MAX_WAIT_SECONDS: "600"
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
+        # The answer files are the evidence for this test, not just the logs:
+        # cleanup.sh copies RESULTS_DIR to ci_results_<build> in the workspace.
+        artifact_paths: ["*.log", "ci_results_*/preemption_correctness/*.txt"]
 
       - label: ":compression: long_doc_qa / {{matrix.request_transport}}"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa

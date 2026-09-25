@@ -1,31 +1,43 @@
 #!/usr/bin/env bash
 # ShareGPT differential correctness for the MP connector under vLLM preemption.
 #
-# A ladder of agreements. The reference is the simplest execution path there
-# is: plain vLLM, a concurrency low enough that preemption is provably
-# impossible. Each rung adds exactly one variable and must reproduce the
-# reference's answers exactly.
+# By default this runs the two rungs that matter for a green build:
 #
-#   ref     baseline server, low concurrency    no preemption, no LMCache
-#   A       baseline server, high concurrency   + preemption
-#   B       LMCache server,  low concurrency    + the connector, cold (writes)
-#   C       LMCache server,  low concurrency    + the connector, warm (reads)
-#   D       LMCache server,  high concurrency   + preemption over both
+#   ref   plain vLLM, low concurrency   the ground truth: no preemption, no LMCache
+#   D     LMCache,    high concurrency  preemption, and KV loaded back on resume
 #
-# Both concurrencies are chosen from the KV pool, which the pipeline pins with
-# NUM_GPU_BLOCKS_OVERRIDE so it does not depend on the GPU model:
-#   * preemption is guaranteed when the requests in flight cannot all be
-#     resident, so the pool fills with a non-empty waiting queue;
-#   * preemption is impossible when the concurrent prompts plus their
-#     max_tokens fit in the pool.
-# Both are asserted from vLLM's own num_preemptions counter rather than
-# assumed, so a mis-sized pool fails the test instead of silently making it
-# vacuous.
+# D must reproduce ref's answers exactly, and must show requests actually
+# resuming with a load (asserted from the connector's <resume-load> log, because
+# vLLM's prefix-cache counters exclude requests with num_preemptions > 0).
 #
-# Answers are compared with .buildkite/correctness/compare_files.py, keyed by
-# request id, and kept as files so a reviewer can read them. Exact comparison
-# needs VLLM_BATCH_INVARIANT=1 plus a model whose kernels vLLM covers; the
-# ref-vs-A rung is what proves the oracle is valid before LMCache is added.
+# The concurrencies come from the KV pool, which the pipeline pins with
+# NUM_GPU_BLOCKS_OVERRIDE so the pressure does not depend on the GPU model:
+# preemption is guaranteed when the requests in flight cannot all be resident,
+# and impossible when the concurrent prompts plus their max_tokens fit. Both are
+# asserted from vllm:num_preemptions_total, so a mis-sized pool fails the run
+# instead of quietly making it vacuous.
+#
+# DEBUGGING A FAILURE
+# -------------------
+# Re-run with PREEMPT_FULL_LADDER=1 to add three intermediate rungs that
+# isolate which variable broke. Each adds one thing to the one below it:
+#
+#   A   plain vLLM, high concurrency   + preemption, still no LMCache
+#   B   LMCache,    low concurrency    + the connector on a cold cache (writes only)
+#   C   LMCache,    low concurrency    + the connector on a warm cache (reads)
+#
+#   * A fails      -> not LMCache. Either vLLM's preempt-and-recompute is lossy,
+#                     or the exact-match oracle is invalid: check that
+#                     VLLM_BATCH_INVARIANT=1, ENFORCE_EAGER and a pinned
+#                     attention backend are in effect and that the model is one
+#                     whose kernels vLLM covers (RMSNorm families).
+#   * A passes, B fails -> storing KV perturbs generation.
+#   * B passes, C fails -> what was stored reads back wrong.
+#   * C passes, D fails -> specific to preemption/resume.
+#
+# The answers are kept as files and compared by request id, so they can be read
+# by hand. With real ShareGPT traffic a cross-request KV mix-up is visible: an
+# answer about one topic continues into another.
 set -e
 set -o pipefail
 
@@ -47,13 +59,21 @@ SHAREGPT_PATH="${SHAREGPT_PATH:-$HOME/correctness/.ShareGPT_V3_unfiltered_cleane
 NUM_REQUESTS="${PREEMPT_NUM_REQUESTS:-100}"
 HOT_CONCURRENCY="${PREEMPT_HOT_CONCURRENCY:-40}"
 REF_CONCURRENCY="${PREEMPT_REF_CONCURRENCY:-3}"
+# Add the intermediate rungs that isolate a failure (see DEBUGGING above).
+FULL_LADDER="${PREEMPT_FULL_LADDER:-0}"
 
 VLLM_LOG="/tmp/build_${BUILD_ID}_vllm.log"
 
+SHAREGPT_URL="https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
 if [ ! -s "$SHAREGPT_PATH" ]; then
-    echo "[ERROR] ShareGPT dataset not found at: $SHAREGPT_PATH"
-    echo "[FIX] wget -q https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json -O '$SHAREGPT_PATH'"
-    exit 1
+    # Pre-seeding $SHAREGPT_PATH on the agent skips this 670 MB download.
+    echo "[INFO] ShareGPT not found at $SHAREGPT_PATH, downloading..."
+    mkdir -p "$(dirname "$SHAREGPT_PATH")"
+    if ! wget -q "$SHAREGPT_URL" -O "$SHAREGPT_PATH"; then
+        rm -f "$SHAREGPT_PATH"
+        echo "[ERROR] could not download the ShareGPT dataset"
+        exit 1
+    fi
 fi
 
 mkdir -p "$OUT"
@@ -157,11 +177,18 @@ rung() {
     fi
 }
 
-rung "ref  (plain vLLM, no preemption)" "$VLLM_BASELINE_PORT" "$REF_CONCURRENCY" ref.txt          no
-rung "A    (plain vLLM, preemption)"    "$VLLM_BASELINE_PORT" "$HOT_CONCURRENCY" preempt.txt      yes
-rung "B    (LMCache, cold, no preempt)" "$VLLM_PORT"          "$REF_CONCURRENCY" lmcache_cold.txt no
-rung "C    (LMCache, warm, no preempt)" "$VLLM_PORT"          "$REF_CONCURRENCY" lmcache_warm.txt no
-rung "D    (LMCache, warm, preemption)" "$VLLM_PORT"          "$HOT_CONCURRENCY" lmcache_preempt.txt yes
+rung "ref  (plain vLLM, no preemption)" "$VLLM_BASELINE_PORT" "$REF_CONCURRENCY" ref.txt no
+
+if [ "$FULL_LADDER" = "1" ] || [ "$FULL_LADDER" = "true" ]; then
+    rung "A    (plain vLLM, preemption)"    "$VLLM_BASELINE_PORT" "$HOT_CONCURRENCY" preempt.txt      yes
+    rung "B    (LMCache, cold, no preempt)" "$VLLM_PORT"          "$REF_CONCURRENCY" lmcache_cold.txt no
+    rung "C    (LMCache, warm, no preempt)" "$VLLM_PORT"          "$REF_CONCURRENCY" lmcache_warm.txt no
+fi
+
+# Cold cache unless the full ladder warmed it, which makes the resume-load
+# assertion below unambiguous: with nothing pre-populated, the only KV a
+# request can hit is KV it stored itself before being preempted.
+rung "D    (LMCache, preemption)"       "$VLLM_PORT"          "$HOT_CONCURRENCY" lmcache_preempt.txt yes
 
 # Rung D must actually have resumed requests that read their KV back, or it
 # proves only that the connector did not corrupt anything. vLLM cannot report
