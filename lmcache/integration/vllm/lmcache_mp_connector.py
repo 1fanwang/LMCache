@@ -1098,21 +1098,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
-        # Assign rather than accumulate: the scheduler polls this method again,
-        # without an intervening update_state_after_alloc(), whenever
-        # allocate_slots() fails, which is common under the memory pressure
-        # that causes preemption.  LMCache holds exactly ``ret`` tokens.
         tracker.num_stored_tokens = ret
         tracker.num_lmcache_hit_tokens = ret
 
         need_to_load = max(0, ret - num_computed_tokens)
 
         if request.status == RequestStatus.PREEMPTED:
-            # This request lost every GPU block to preemption, so the tokens
-            # counted here are KV it stored before it was evicted.  vLLM
-            # cannot report this: its prefix-cache counters route requests
-            # with num_preemptions > 0 into PrefixCacheStats.preempted_hits,
-            # which is never exported.
             logger.info(
                 "<resume-load> req=%s apc=%d lmcache=%d load=%d",
                 request.request_id,
